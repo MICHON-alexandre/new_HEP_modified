@@ -36,8 +36,9 @@ class StatisticalAnalysis:
         save: Save the saved_info dictionary to a file.
         load: Load the saved_info dictionary from a file.
     """
-    def __init__(self,model,holdout_set,bins=10):
+    def __init__(self,model,holdout_set,train_set=None,bins=10):
         self.model = model
+        self.train_set = train_set
         self.bins = bins
         self.syst_settings = {
             'tes': 1.0,
@@ -60,9 +61,9 @@ class StatisticalAnalysis:
         
         holdout_set["data"].reset_index(drop=True, inplace=True)
         
-        self.holdout_set = holdout_set
+        self.holdout_set, self.train_set = holdout_set, holdout_set #I added train set to compute mu on the train set in the future but currently, train_set = holdout_set
         
-    def compute_mu(self,score, weight, plot=False):
+    def compute_mu(self,score, weight, syst_value=None, which_syst=None, plot=False, NLL=False):
         """
         Perform calculations to calculate mu using the profile likelihood method.
         
@@ -74,7 +75,7 @@ class StatisticalAnalysis:
         Returns:
             dict: Dictionary containing calculated values of mu_hat, delta_mu_hat, p16, and p84.
         """
-        
+        self.syst_value, self.which_syst = syst_value, which_syst
         N_obs, _ = np.histogram(score, bins=self.bins, density=False, weights=weight)
                     
         def combined_fit_function_s(x):
@@ -120,43 +121,54 @@ class StatisticalAnalysis:
 
             sigma_asimov_mu = sigma_asimov(mu, alpha)
 
-            hist_llr = (
-                - N_obs
-                * np.log((sigma_asimov_mu))
-            ) + (sigma_asimov_mu)
+            hist_llr = ( - N_obs * np.log(sigma_asimov_mu)) + sigma_asimov_mu
 
             return hist_llr.sum()
 
-        result = Minuit(NLL,
-                        mu=1.0,
-                        tes=1.0,
-                        bkg_scale=1.0,
-                        jes=1.0,
-                        soft_met=0.0,
-                        ttbar_scale=1.0,
-                        diboson_scale=1.0,
-                        )
+        def bins():
+            """
+            Calculate the quantities of signal and background for each bin.
 
-        result.errordef = Minuit.LIKELIHOOD
-        result.migrad()
+            Parameters:
+            None
 
-        mu_hat = result.values['mu']
-        mu_p16 = mu_hat - result.errors['mu']
-        mu_p84 = mu_hat  + result.errors['mu']
+            Returns:
+            Lists of signal and backround with quantities for each bin
+            """
+            S_hist, B_hist = self.nominal_histograms(self.syst_value, self.which_syst)
+            S, _ = S_hist
+            B, _ = B_hist
+            return S, B
 
-        if plot:
-            result.draw_profile('mu')
-            result.draw_mnprofile('mu')
-            plt.show()
+        if NLL: #NLL method is called
+
+            result = Minuit(NLL, mu=1.0, tes=1.0, bkg_scale=1.0, jes=1.0, soft_met=0.0, ttbar_scale=1.0, diboson_scale=1.0)
+            result.errordef = Minuit.LIKELIHOOD
+            result.migrad()
+            
+            mu_hat = result.values['mu']
+            mu_error = result.errors['mu']
+    
+            if plot:
+                result.draw_profile('mu')
+                result.draw_mnprofile('mu')
+                plt.savefig('figure.png')
+                plt.show()
+        else: #Bins method is called
+            
+            S, B = bins()
+            mu_hat_list = (N_obs - B)/S
+            mu_error_list = (S + B)**0.5/S
+            mu_hat = 0
+            normalisation = 0
+            for i in range(self.bins):
+                mu_hat += mu_hat_list[i]/mu_error_list[i] #We compute the sum with a ponderation which is 1/error
+                normalisation += 1//mu_error_list[i]
+            
+            mu_hat = mu_hat/normalisation
+            mu_error = (1/normalisation)**0.5
         
-        return {
-            "mu_hat": mu_hat,
-            "delta_mu_hat" : result.errors['mu'] * 2,
-            "p16": mu_p16,
-            "p84": mu_p84,
-        }
-        
-
+        return {"mu_hat": mu_hat, "delta_mu_hat" : mu_error * 2, "p16": mu_hat - mu_error, "p84": mu_hat + mu_error}
 
     def calculate_saved_info(self):
         """
@@ -241,7 +253,7 @@ class StatisticalAnalysis:
         b_array = np.zeros((len(alpha_list), self.bins))
         
         for i in range(len(alpha_list)):
-            s_array[i], s_array[i] = self.nominal_histograms(alpha_list[i], key)
+            s_array[i], b_array[i] = self.nominal_histograms(alpha_list[i], key)
 
         s_array = s_array.T
         b_array = b_array.T
